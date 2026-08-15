@@ -11,3 +11,18 @@ test("persisting a non-active goal cancels any queued continuation", () => {
 		/if \(next\?\.status !== "active"\) \{\s*continuationQueued = false;\s*\}/,
 	);
 });
+
+test("continuations are dispatched only after Pi has fully settled", () => {
+	assert.match(indexSource, /pi\.on\("agent_settled"/);
+	assert.doesNotMatch(indexSource, /pi\.on\("agent_end"/);
+	assert.match(indexSource, /lastTurnWasError \|\| !ctx\.isIdle\(\) \|\| ctx\.hasPendingMessages\(\)/);
+});
+
+test("error turns skip persistence and synthetic continuations", () => {
+	assert.match(indexSource, /if \(isAssistantErrorMessage\(message\)\) \{[\s\S]*?lastTurnWasError = true;[\s\S]*?return;\s*\}/);
+	assert.match(indexSource, /pi\.on\("context"[\s\S]*?filterAssistantErrorMessages\(event\.messages\)/);
+});
+
+test("a user abort pauses instead of silently continuing", () => {
+	assert.match(indexSource, /if \(isAssistantAbortMessage\(message\)\) \{[\s\S]*?status: "paused"[\s\S]*?Goal paused after abort/);
+});
