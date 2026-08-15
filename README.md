@@ -11,7 +11,7 @@ This fork makes provider retries context-neutral. Quota and transient provider e
 ## Install
 
 ```bash
-pi install npm:@windusth/pi-goal
+pi install npm:@windust/pi-goal
 ```
 
 Or from git:

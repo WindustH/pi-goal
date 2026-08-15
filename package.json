@@ -1,5 +1,5 @@
 {
-  "name": "@windusth/pi-goal",
+  "name": "@windust/pi-goal",
   "version": "0.2.0",
   "description": "Context-neutral persistent goals for Pi with safe provider retry handling",
   "type": "commonjs",
