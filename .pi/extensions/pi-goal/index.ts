@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Box, Spacer, Text } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Spacer, Text } from "@earendil-works/pi-tui";
 import {
 	accountGoalTurn,
 	createGoalState,
@@ -13,6 +13,7 @@ import {
 	type GoalStatus,
 	normalizeTokenBudget,
 } from "./goal-state";
+import { filterAssistantErrorMessages, isAssistantAbortMessage, isAssistantErrorMessage, type AssistantMessageSnapshot } from "./retry-context";
 import { tokenDeltaFromUsage, type UsageSnapshot } from "./usage";
 
 const CUSTOM_TYPE = "pi-goal";
@@ -23,6 +24,7 @@ let statusBarEnabled = true;
 let activeTurnStartedAt: number | null = null;
 let activeGoalThisTurnId: string | null = null;
 let continuationQueued = false;
+let lastTurnWasError = false;
 
 // The `content` field is what the LLM sees in the conversation history.
 // Every goal event MUST carry actionable text — never a cryptic marker.
@@ -380,6 +382,7 @@ export default function piGoal(pi: ExtensionAPI) {
 		continuationQueued = false;
 		activeTurnStartedAt = null;
 		activeGoalThisTurnId = null;
+		lastTurnWasError = false;
 		// Keep create_goal available, and hide read/update tools unless there is an active goal to pursue.
 		syncGoalTools(pi);
 		if (goal?.status === "active" && event.reason === "reload") {
@@ -417,19 +420,54 @@ export default function piGoal(pi: ExtensionAPI) {
 			activeGoalThisTurnId = null;
 			return;
 		}
+		const message = event.message as AssistantMessageSnapshot;
+		if (isAssistantErrorMessage(message)) {
+			// Pi owns provider retries. Do not append a goal-state entry and do
+			// not queue a continuation while a retry is in flight. The context
+			// hook below also removes these diagnostic messages from subsequent
+			// provider requests, so retrying does not grow the model context.
+			activeTurnStartedAt = null;
+			activeGoalThisTurnId = null;
+			lastTurnWasError = true;
+			return;
+		}
 		const elapsed = activeTurnStartedAt ? Math.max(0, Math.round((Date.now() - activeTurnStartedAt) / 1000)) : 0;
 		activeTurnStartedAt = null;
 		activeGoalThisTurnId = null;
-		const tokenDelta = tokenDeltaFromUsage((event.message as { usage?: UsageSnapshot } | undefined)?.usage);
-		const next = accountGoalTurn(goal, tokenDelta, elapsed);
+		lastTurnWasError = false;
+		const tokenDelta = tokenDeltaFromUsage((message as { usage?: UsageSnapshot } | undefined)?.usage);
+		let next = accountGoalTurn(goal, tokenDelta, elapsed);
+		if (isAssistantAbortMessage(message)) {
+			next = { ...next, status: "paused", updatedAt: Date.now() };
+			persist(pi, ctx, next);
+			ctx.ui.notify(
+				`‖ Goal paused after abort: ${truncateObjective(next.objective)}\nUse /goal resume to continue, or /goal clear to stop.`,
+				"info",
+			);
+			return;
+		}
 		persist(pi, ctx, next);
 		if (next.status === "budget_limited") {
 			emitGoalEvent(pi, "budget_limited", next, { triggerTurn: true, deliverAs: "followUp" });
 		}
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
-		if (!goal || goal.status !== "active" || ctx.hasPendingMessages()) return;
+	// Error assistant messages remain in the local session as diagnostics, but
+	// never participate in a later provider request. In particular, thousands
+	// of quota retries cannot inflate the paid input context.
+	pi.on("context", (event) => {
+		const messages = filterAssistantErrorMessages(event.messages);
+		if (messages.length === event.messages.length) return;
+		return { messages };
+	});
+
+	// agent_end can fire before Pi's native retry, auto-compaction, or queued
+	// follow-up work has drained. Only create the next goal continuation at the
+	// official settled boundary. A settled error gets no synthetic message;
+	// this prevents the extension from turning one failed request into an
+	// ever-growing chain of duplicate continuation prompts.
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!goal || goal.status !== "active" || lastTurnWasError || !ctx.isIdle() || ctx.hasPendingMessages()) return;
 		queueContinuation(pi, goal);
 	});
 }

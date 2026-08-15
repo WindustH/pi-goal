@@ -1,7 +1,7 @@
 {
-  "name": "pi-goal",
-  "version": "0.1.7",
-  "description": "Persistent autonomous goals for pi — /goal loops until complete, paused, or budget-limited",
+  "name": "@windusth/pi-goal",
+  "version": "0.2.0",
+  "description": "Context-neutral persistent goals for Pi with safe provider retry handling",
   "type": "commonjs",
   "keywords": [
     "pi-package",
@@ -25,8 +25,8 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": ">=0.80.6",
+    "@earendil-works/pi-tui": ">=0.80.6"
   },
   "devDependencies": {
     "jiti": "^2.7.0"
@@ -36,6 +36,17 @@
     "test": "node --test test/**/*.test.cjs",
     "pack:dry": "npm pack --dry-run"
   },
-  "author": "michaelliv",
+  "author": "WindustH",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WindustH/pi-goal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/WindustH/pi-goal/issues"
+  },
+  "homepage": "https://github.com/WindustH/pi-goal#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }
