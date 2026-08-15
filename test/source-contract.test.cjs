@@ -3,37 +3,28 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { test } = require("node:test");
 
-const indexSource = readFileSync(join(__dirname, "../.pi/extensions/pi-goal/index.ts"), "utf8");
-const readme = readFileSync(join(__dirname, "../README.md"), "utf8");
+const runtime = readFileSync(join(__dirname, "../.pi/extensions/pi-goal/runtime.ts"), "utf8");
+const index = readFileSync(join(__dirname, "../.pi/extensions/pi-goal/index.ts"), "utf8");
 
-test("create_goal tool carries strong goal-writing contract", () => {
-	assert.match(indexSource, /A goal must be a durable, evidence-checkable work contract/);
-	for (const phrase of [
-		"outcome, verification surface, constraints, boundaries, iteration policy, and blocked stop condition",
-		"Do not infer goals from ordinary coding tasks or one-off prompts",
-		"Use this objective shape when possible",
-		"verified by <specific evidence>, while preserving <constraints>",
-		"Prefer a self-contained objective that survives continuation turns and context compaction",
-		"ask a clarifying question if missing success criteria or boundaries materially affect the contract",
-	]) {
-		assert.match(indexSource, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-	}
+test("entrypoint owns no mutable cross-session goal state", () => {
+	assert.match(index, /new GoalRuntime\(pi\)\.register\(\)/);
+	assert.doesNotMatch(index, /let goal|let activeTurn|let continuation/);
 });
 
-test("create_goal uses upsert semantics for explicitly requested goals", () => {
-	assert.match(indexSource, /sets or replaces the current thread goal/);
-	assert.match(indexSource, /When called, create_goal replaces any existing goal with the new objective/);
-	assert.doesNotMatch(indexSource, /replaceExisting/);
-	assert.doesNotMatch(indexSource, /This thread already has a goal/);
+test("runtime uses all user-interrupt signals to pause", () => {
+	assert.match(runtime, /signal\.addEventListener\("abort"/);
+	assert.match(runtime, /isAssistantAbortMessage/);
+	assert.match(runtime, /streamingBehavior === "steer"/);
+	assert.match(runtime, /"interrupt"/);
 });
 
-test("update_goal remains completion-only in schema and guidance", () => {
-	assert.match(indexSource, /name: "update_goal"/);
-	assert.match(indexSource, /enum: \["complete"\]/);
-	assert.match(indexSource, /Do not use update_goal to pause, resume, abandon, or budget-limit a goal/);
+test("budget and empty-turn stops never synthesize a wrap-up request", () => {
+	assert.match(runtime, /isEmptySuccessfulAssistantTurn/);
+	assert.match(runtime, /No extra wrap-up turn was started/);
+	assert.doesNotMatch(runtime, /budgetLimitPrompt|"budget_limited".*triggerTurn/s);
 });
 
-test("README documents the model-set goal and completion accounting contracts", () => {
-	assert.match(readme, /`create_goal` tool: model can set or replace the current goal only when explicitly requested/);
-	assert.match(readme, /The final turn is still accounted even when the model completes the goal mid-turn/);
+test("continuation dispatch stays on agent_settled, never agent_end", () => {
+	assert.match(runtime, /this\.pi\.on\("agent_settled"/);
+	assert.doesNotMatch(runtime, /this\.pi\.on\("agent_end"/);
 });

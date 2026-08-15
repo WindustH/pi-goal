@@ -2,11 +2,9 @@
 
 ![pi-goal](docs/assets/pi-goal-poster.png)
 
-Persistent autonomous goals for [Pi](https://github.com/earendil-works/pi).
+Robust, context-neutral persistent goals for [Pi](https://github.com/earendil-works/pi), with shared TUI and pi-web status controls.
 
-`pi-goal` adds a `/goal` command and goal tools so Pi can keep working toward a long-running, thread-scoped objective until the goal is complete, paused, cleared, or token-budget-limited.
-
-This fork makes provider retries context-neutral. Quota and transient provider errors may still be retried by Pi, but failed assistant messages are removed from every later provider context, error turns do not persist duplicate goal state, and the extension does not inject another continuation while Pi's retry/compaction pipeline is active. When the provider succeeds and Pi fully settles, goal work continues naturally.
+`pi-goal` keeps a thread-scoped objective running until it is completed, paused, cleared, or token-budget-limited. Provider failures do not create extension continuation loops, repeated goal prompts are collapsed before every model request, and each Pi/pi-web session owns an isolated runtime.
 
 ## Install
 
@@ -14,80 +12,122 @@ This fork makes provider retries context-neutral. Quota and transient provider e
 pi install npm:@windust/pi-goal
 ```
 
-Or from git:
+Or from GitHub:
 
 ```bash
 pi install git:github.com/WindustH/pi-goal
 ```
 
-If the original unscoped package is installed, remove it first so only one extension owns `/goal`:
+Remove the original unscoped package if it is still installed, so only one extension owns `/goal`:
 
 ```bash
 pi remove npm:pi-goal
 ```
 
-## Usage
+Pi 0.80.6 or newer is required. The Web UI is tested with `@agegr/pi-web` 0.8.8.
+
+## Usage and controls
 
 ```text
-/goal improve benchmark coverage until the suite has strong evidence
-/goal --tokens 50k finish the migration and verify tests
-/goal
+/goal improve benchmark coverage until every requirement has direct evidence
+/goal --tokens 50k finish the migration and verify it
+/goal                 # open interactive controls
 /goal status
 /goal pause
 /goal resume
+/goal complete
 /goal clear
-/goal statusbar off
+/goal ui on|off
+/goal statusbar on|off
 ```
 
-When a goal is active, the extension shows compact visible lifecycle markers like `Goal active` and `Goal continuing`; expand them with `ctrl+o` to inspect the objective and usage. The full continuation instructions ride along as the content of that custom message, so the model always has the objective and audit guidance in the transcript while the renderer keeps the visible UI compact.
+The persistent `Goal` widget shows lifecycle state, objective, completed turns, token/time usage, and retry state.
 
-The same Pi agent keeps running normal turns in the same session context until it calls `update_goal({ status: "complete" })`, the user pauses/clears it, or the token budget is reached. Reloading Pi pauses an active goal instead of silently resuming it; use `/goal resume` to continue. Pi 0.80.6 or newer is required because safe continuation uses the `agent_settled` lifecycle boundary.
+- In the TUI, `/goal` opens the native selector.
+- In `@agegr/pi-web`, `/goal` opens native Retry/Pause, Resume/Reopen, Mark complete, Clear, and Close buttons. These are extension UI actions, not prompts, so clicking them spends no model tokens and adds no conversation message.
+- The widget uses Pi's official string-array `setWidget` contract, which pi-web relays through its RPC extension UI protocol. No pi-web patch or fork is required.
 
-## What it adds
+`/goal ui off` hides the expanded widget. `/goal statusbar off` independently hides the compact footer status.
 
-- `pi-goal-writer` skill: draft and review strong `/goal` objectives with evidence-based success criteria
-- `/goal [--tokens 50k] <objective>`: set or replace a goal
-- `/goal` or `/goal status`: show the current goal
-- `/goal pause`: stop autonomous continuation without deleting the goal
-- `/goal resume`: reactivate a paused goal
-- `/goal clear`: remove the goal
-- `/goal statusbar on|off`: show or hide the footer status line
-- `create_goal` tool: model can set or replace the current goal only when explicitly requested
-- `get_goal` tool: read current goal state
-- `update_goal` tool: model can only mark the goal `complete`
-- `get_goal` and `update_goal` are only exposed to the model while a goal is `active`; paused, cleared, complete, and budget-limited goals hide them so unrelated sessions are not tempted to call them
-- footer status: `Pursuing goal`, `Goal paused`, `Goal achieved`, or `Goal unmet`
+## Provider retry behavior
 
-## Flow
+On an assistant `error` turn, the extension:
 
-```text
-/goal <objective>
-  -> persist goal in the current Pi session
-  -> show compact Goal marker and footer status
-  -> deliver continuation instructions as the marker's message content
-  -> trigger an agent turn
-  -> account time/tokens on turn_end
-  -> provider errors: let Pi retry, filter errors from context, append no goal messages
-  -> queue another continuation on agent_settled while active
-  -> stop when update_goal marks complete, user pauses/clears, or budget is hit
+- appends no `pi-goal` state entry;
+- sends no synthetic continuation;
+- removes the error from every later provider context;
+- leaves retry timing and cancellation to Pi;
+- shows an in-memory `RETRYING · … · context unchanged` UI state.
+
+Pi's agent-level retry window is finite by default. For the long quota-hold behavior—keep the same provider request retrying until quota returns, without finalizing more assistant messages—configure provider-level retries in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "retry": {
+    "enabled": true,
+    "provider": {
+      "maxRetries": 1000000,
+      "maxRetryDelayMs": 60000
+    }
+  }
+}
 ```
 
-## Retry behavior
+Provider-level retry keeps the request in flight and can remain blocked until quota recovers. It is still abortable. If Pi's configured retry window does end, pi-goal enters a visible `WAITING` state without injecting a message; `/goal resume` starts another window.
 
-- Provider `error` messages stay in the local JSONL transcript for diagnostics, but the `context` hook removes them before every later model request.
-- Error turns do not append `pi-goal` state entries and do not add `pi-goal-event` continuation messages.
-- Pi retains ownership of retry timing and backoff. The extension waits for `agent_settled`, which fires only after native retries, auto-compaction, and pending messages have drained.
-- Once a retry succeeds, its real usage is accounted once and the next goal continuation is dispatched normally.
-- A user abort is not treated as a retryable provider error: it pauses the goal immediately.
-- There is no automatic-turn cap in this fork. Optional `/goal --tokens ...` budgets, manual pause/clear, reload pause, and verified completion keep their existing behavior.
+There is no automatic goal-turn cap. An optional `--tokens` budget remains available only when the user explicitly requests one.
 
-## Completion behavior
+## Interrupt and token-safety behavior
 
-The model is instructed to audit completion against real evidence before calling `update_goal`. The `update_goal` tool deliberately accepts only `status: "complete"`; pausing, resuming, clearing, and budget limiting are controlled by the user or extension runtime. The final turn is still accounted even when the model completes the goal mid-turn.
+- A user abort pauses the active goal immediately. The runtime observes Pi's `AbortSignal`, finalized `stopReason: "aborted"`, and mid-stream user steering, covering both TUI and RPC/pi-web paths.
+- A successful but empty provider response pauses the goal instead of starting an empty continuation loop.
+- Reaching a token budget stops immediately; pi-goal does not spend an extra model turn asking for a wrap-up.
+- Pause, clear, completion, settings, and Web button actions are persisted as non-context custom entries. They do not inject lifecycle prose into the model conversation.
+- Failed-attempt usage is accumulated in memory and folded into the next persisted state once, rather than writing one state entry per error.
 
-## State
+## Context policy
 
-Goal state is stored as Pi custom session entries with `customType: "pi-goal"`. It follows the active session branch, survives reloads, and does not require an external database.
+The full active objective and completion contract are injected once per agent run through `before_agent_start`. Continuation messages are intentionally tiny and hidden.
+
+Before every provider request, the context policy:
+
+1. removes every assistant error message;
+2. removes goal triggers from old/replaced/paused goals;
+3. keeps at most the newest trigger for the active goal;
+4. rewrites even a legacy full continuation prompt to the compact trigger text.
+
+This is non-destructive: local JSONL may retain core Pi error diagnostics, but they are never sent back to a model. Thousands of historical errors and continuation prompts therefore contribute zero errors and at most one short trigger to paid input context.
+
+## Goal tools
+
+- `create_goal`: creates or replaces a goal only when the user or system explicitly requests goal mode.
+- `get_goal`: reads the active goal when the injected state is insufficient.
+- `update_goal`: accepts only `status: "complete"`, after an evidence-backed completion audit.
+
+`get_goal` and `update_goal` are exposed only while a goal is active. `create_goal` stays available so an explicitly requested goal can be created or replaced.
+
+## Architecture
+
+The extension is split by responsibility:
+
+- `runtime.ts`: one isolated controller per Pi AgentSession; lifecycle wiring and durable commits;
+- `goal-state.ts`: validated schema migration and pure state transitions;
+- `context-policy.ts`: provider-context error removal and trigger compaction;
+- `continuation-scheduler.ts`: race-safe continuation coalescing and cancellation;
+- `ui.ts`: shared status/widget view model and interactive control choices;
+- `prompts.ts`: the active-goal system contract;
+- `retry-context.ts` and `usage.ts`: provider outcome classification and accounting.
+
+Schema v1 session state migrates to v2 on restore. Malformed state is ignored instead of crashing the extension. Module-global mutable goal state has been removed, preventing cross-session leakage when pi-web runs multiple AgentSession instances in one process.
+
+## Development
+
+```bash
+npm test
+npm run typecheck
+npm run check
+npm run pack:dry
+```
 
 ## License
 

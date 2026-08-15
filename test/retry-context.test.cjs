@@ -7,6 +7,7 @@ const {
 	filterAssistantErrorMessages,
 	isAssistantAbortMessage,
 	isAssistantErrorMessage,
+	isEmptySuccessfulAssistantTurn,
 } = jiti("../.pi/extensions/pi-goal/retry-context.ts");
 
 test("isAssistantErrorMessage recognizes only assistant error turns", () => {
@@ -40,4 +41,12 @@ test("thousands of retry errors add zero messages to the next provider context",
 		errorMessage: "429 usage limit",
 	}));
 	assert.deepEqual(filterAssistantErrorMessages([user, ...errors]), [user]);
+});
+
+test("empty successful responses are stopped but tool work is not", () => {
+	assert.equal(isEmptySuccessfulAssistantTurn({ role: "assistant", stopReason: "stop", content: [] }, []), true);
+	assert.equal(isEmptySuccessfulAssistantTurn({ role: "assistant", stopReason: "length", content: [{ type: "text", text: "  " }] }, []), true);
+	assert.equal(isEmptySuccessfulAssistantTurn({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }, []), false);
+	assert.equal(isEmptySuccessfulAssistantTurn({ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall" }] }, []), false);
+	assert.equal(isEmptySuccessfulAssistantTurn({ role: "assistant", stopReason: "stop", content: [] }, [{}]), false);
 });
