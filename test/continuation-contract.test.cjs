@@ -1,28 +1,37 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
 const { test } = require("node:test");
+const { createJiti } = require("jiti");
 
-const indexSource = readFileSync(join(__dirname, "../.pi/extensions/pi-goal/index.ts"), "utf8");
+const jiti = createJiti(__filename);
+const { ContinuationScheduler } = jiti("../.pi/extensions/pi-goal/continuation-scheduler.ts");
 
-test("persisting a non-active goal cancels any queued continuation", () => {
-	assert.match(
-		indexSource,
-		/if \(next\?\.status !== "active"\) \{\s*continuationQueued = false;\s*\}/,
-	);
+test("scheduler coalesces duplicate continuation requests", async () => {
+	const scheduler = new ContinuationScheduler();
+	let dispatches = 0;
+	assert.equal(scheduler.request("goal-1", () => dispatches++), true);
+	assert.equal(scheduler.request("goal-1", () => dispatches++), false);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(dispatches, 1);
+	assert.equal(scheduler.pending, true);
 });
 
-test("continuations are dispatched only after Pi has fully settled", () => {
-	assert.match(indexSource, /pi\.on\("agent_settled"/);
-	assert.doesNotMatch(indexSource, /pi\.on\("agent_end"/);
-	assert.match(indexSource, /lastTurnWasError \|\| !ctx\.isIdle\(\) \|\| ctx\.hasPendingMessages\(\)/);
+test("cancel invalidates queued microtasks, including pause-resume races", async () => {
+	const scheduler = new ContinuationScheduler();
+	const sent = [];
+	scheduler.request("goal-1", () => sent.push("stale"));
+	scheduler.cancel();
+	scheduler.request("goal-1", () => sent.push("fresh"));
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(sent, ["fresh"]);
 });
 
-test("error turns skip persistence and synthetic continuations", () => {
-	assert.match(indexSource, /if \(isAssistantErrorMessage\(message\)\) \{[\s\S]*?lastTurnWasError = true;[\s\S]*?return;\s*\}/);
-	assert.match(indexSource, /pi\.on\("context"[\s\S]*?filterAssistantErrorMessages\(event\.messages\)/);
-});
-
-test("a user abort pauses instead of silently continuing", () => {
-	assert.match(indexSource, /if \(isAssistantAbortMessage\(message\)\) \{[\s\S]*?status: "paused"[\s\S]*?Goal paused after abort/);
+test("turn start releases the dispatched guard for the next settled boundary", async () => {
+	const scheduler = new ContinuationScheduler();
+	let dispatches = 0;
+	scheduler.request("goal-1", () => dispatches++);
+	await new Promise((resolve) => setImmediate(resolve));
+	scheduler.turnStarted();
+	scheduler.request("goal-1", () => dispatches++);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(dispatches, 2);
 });

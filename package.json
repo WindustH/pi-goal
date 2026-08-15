@@ -1,7 +1,7 @@
 {
   "name": "@windust/pi-goal",
-  "version": "0.2.0",
-  "description": "Context-neutral persistent goals for Pi with safe provider retry handling",
+  "version": "0.3.0",
+  "description": "Robust context-neutral goals for Pi with TUI and pi-web controls",
   "type": "commonjs",
   "keywords": [
     "pi-package",
@@ -29,10 +29,12 @@
     "@earendil-works/pi-tui": ">=0.80.6"
   },
   "devDependencies": {
-    "jiti": "^2.7.0"
+    "jiti": "^2.7.0",
+    "typescript": "^7.0.2"
   },
   "scripts": {
     "check": "pi --no-extensions -e ./.pi/extensions/pi-goal/index.ts --list-models __pi_goal_load_check__",
+    "typecheck": "tsc --noEmit",
     "test": "node --test test/**/*.test.cjs",
     "pack:dry": "npm pack --dry-run"
   },

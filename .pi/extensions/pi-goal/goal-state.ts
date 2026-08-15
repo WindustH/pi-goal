@@ -1,18 +1,20 @@
 export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
 
+export type GoalPauseReason = "user" | "interrupt" | "reload" | "empty_response" | null;
+
 export type GoalState = {
-	version: 1;
+	version: 2;
 	id: string;
 	objective: string;
 	status: GoalStatus;
+	pauseReason: GoalPauseReason;
 	tokenBudget: number | null;
 	tokensUsed: number;
 	timeUsedSeconds: number;
+	turnsCompleted: number;
 	createdAt: number;
 	updatedAt: number;
 };
-
-export type GoalEventKind = "active" | "continuation" | "paused" | "resumed" | "cleared" | "budget_limited" | "complete";
 
 export function parseTokenBudget(input: string): { objective: string; tokenBudget: number | null; error?: string } {
 	const match = input.match(/(?:^|\s)--tokens(?:=|\s+)(\S+\s*[kKmM]?)(?:\s|$)/);
@@ -57,16 +59,18 @@ export function formatElapsed(seconds: number): string {
 
 export function statusLine(state: GoalState | null): string | undefined {
 	if (!state) return undefined;
-	const budget = state.tokenBudget ? ` (${formatTokens(state.tokensUsed)} / ${formatTokens(state.tokenBudget)})` : ` (${formatElapsed(state.timeUsedSeconds)})`;
+	const budget = state.tokenBudget
+		? ` (${formatTokens(state.tokensUsed)} / ${formatTokens(state.tokenBudget)})`
+		: ` (${formatElapsed(state.timeUsedSeconds)})`;
 	if (state.status === "active") return `Pursuing goal${budget}`;
 	if (state.status === "paused") return "Goal paused (/goal resume)";
-	if (state.status === "budget_limited") return state.tokenBudget ? `Goal unmet${budget}` : "Goal abandoned";
+	if (state.status === "budget_limited") return state.tokenBudget ? `Goal budget reached${budget}` : "Goal stopped";
 	return `Goal achieved${budget}`;
 }
 
 export function goalUsage(state: GoalState): string {
 	if (state.tokenBudget != null) return `${formatTokens(state.tokensUsed)} / ${formatTokens(state.tokenBudget)} tokens`;
-	return formatElapsed(state.timeUsedSeconds);
+	return `${formatTokens(state.tokensUsed)} tokens · ${formatElapsed(state.timeUsedSeconds)}`;
 }
 
 export function truncateObjective(objective: string, max = 96): string {
@@ -74,42 +78,93 @@ export function truncateObjective(objective: string, max = 96): string {
 	return singleLine.length > max ? `${singleLine.slice(0, max - 1)}…` : singleLine;
 }
 
-export function goalEventStatus(kind: GoalEventKind): string {
-	const labels: Record<GoalEventKind, string> = {
-		active: "active",
-		continuation: "continuing",
-		paused: "paused",
-		resumed: "resumed",
-		cleared: "cleared",
-		budget_limited: "budget reached",
-		complete: "achieved",
-	};
-	return labels[kind];
-}
-
 export function createGoalState(objective: string, tokenBudget: number | null, now = Date.now(), random = Math.random()): GoalState {
 	return {
-		version: 1,
+		version: 2,
 		id: `${now}-${random.toString(16).slice(2)}`,
 		objective,
 		status: "active",
+		pauseReason: null,
 		tokenBudget,
 		tokensUsed: 0,
 		timeUsedSeconds: 0,
+		turnsCompleted: 0,
 		createdAt: now,
 		updatedAt: now,
 	};
 }
 
-export function accountGoalTurn(state: GoalState, tokenDelta: number, elapsedSeconds: number, now = Date.now()): GoalState {
+function finiteNonNegative(value: unknown): number {
+	const numeric = Number(value);
+	return Number.isFinite(numeric) && numeric >= 0 ? numeric : 0;
+}
+
+export function restoreGoalState(value: unknown): GoalState | null {
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Record<string, unknown>;
+	if (typeof candidate.id !== "string" || !candidate.id) return null;
+	if (typeof candidate.objective !== "string" || !candidate.objective.trim()) return null;
+	if (!["active", "paused", "budget_limited", "complete"].includes(String(candidate.status))) return null;
+	const tokenBudget = candidate.tokenBudget == null ? null : finiteNonNegative(candidate.tokenBudget);
+	if (tokenBudget === 0 && candidate.tokenBudget != null) return null;
+	const status = candidate.status as GoalStatus;
+	const pauseReason = candidate.version === 2 && ["user", "interrupt", "reload", "empty_response", null].includes(candidate.pauseReason as GoalPauseReason)
+		? (candidate.pauseReason as GoalPauseReason)
+		: status === "paused" ? "user" : null;
+	return {
+		version: 2,
+		id: candidate.id,
+		objective: candidate.objective.trim(),
+		status,
+		pauseReason,
+		tokenBudget,
+		tokensUsed: finiteNonNegative(candidate.tokensUsed),
+		timeUsedSeconds: finiteNonNegative(candidate.timeUsedSeconds),
+		turnsCompleted: Math.floor(finiteNonNegative(candidate.turnsCompleted)),
+		createdAt: finiteNonNegative(candidate.createdAt),
+		updatedAt: finiteNonNegative(candidate.updatedAt),
+	};
+}
+
+export function accountGoalUsage(
+	state: GoalState,
+	tokenDelta: number,
+	elapsedSeconds: number,
+	options: { completedTurn?: boolean; now?: number } = {},
+): GoalState {
 	let next: GoalState = {
 		...state,
 		tokensUsed: state.tokensUsed + Math.max(0, tokenDelta),
 		timeUsedSeconds: state.timeUsedSeconds + Math.max(0, elapsedSeconds),
-		updatedAt: now,
+		turnsCompleted: state.turnsCompleted + (options.completedTurn ? 1 : 0),
+		updatedAt: options.now ?? Date.now(),
 	};
 	if (next.status === "active" && next.tokenBudget != null && next.tokensUsed >= next.tokenBudget) {
-		next = { ...next, status: "budget_limited" };
+		next = { ...next, status: "budget_limited", pauseReason: null };
 	}
 	return next;
+}
+
+export function accountGoalTurn(state: GoalState, tokenDelta: number, elapsedSeconds: number, now = Date.now()): GoalState {
+	return accountGoalUsage(state, tokenDelta, elapsedSeconds, { completedTurn: true, now });
+}
+
+export function pauseGoal(state: GoalState, reason: Exclude<GoalPauseReason, null>, now = Date.now()): GoalState {
+	if (state.status !== "active") return state;
+	return { ...state, status: "paused", pauseReason: reason, updatedAt: now };
+}
+
+export function resumeGoal(state: GoalState, now = Date.now()): GoalState {
+	const clearExhaustedBudget = state.tokenBudget != null && state.tokensUsed >= state.tokenBudget;
+	return {
+		...state,
+		status: "active",
+		pauseReason: null,
+		tokenBudget: clearExhaustedBudget ? null : state.tokenBudget,
+		updatedAt: now,
+	};
+}
+
+export function completeGoal(state: GoalState, now = Date.now()): GoalState {
+	return { ...state, status: "complete", pauseReason: null, updatedAt: now };
 }
